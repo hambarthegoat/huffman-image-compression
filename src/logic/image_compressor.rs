@@ -3,6 +3,7 @@ use crate::logic::image_metadata::ImageMetadata;
 
 use super::node::Node;
 use std::{
+    cmp::Ordering,
     collections::{BinaryHeap, HashMap},
     error::Error,
     fs::File,
@@ -30,13 +31,26 @@ impl ImageCompressor {
         let img = image::open(input_path)?;
         let (w, h) = (img.width(), img.height());
 
-        let (raw_px, color_type) = match img {
-            image::DynamicImage::ImageLuma8(gray) => (gray.into_raw(), ColorType::Grayscale),
-            image::DynamicImage::ImageRgb8(rgb) => (rgb.into_raw(), ColorType::Rgb),
-            image::DynamicImage::ImageRgba8(rgba) => (rgba.into_raw(), ColorType::Rgba),
-            _ => {
-                let rgb = img.to_rgb8();
-                (rgb.into_raw(), ColorType::Rgb)
+        let is_grayscale_color = matches!(
+            img.color(),
+            image::ColorType::L8
+                | image::ColorType::La8
+                | image::ColorType::L16
+                | image::ColorType::La16
+        );
+
+        let (raw_px, color_type) = if is_grayscale_color {
+            let gray = img.into_luma8();
+            (gray.into_raw(), ColorType::Grayscale)
+        } else {
+            match img {
+                image::DynamicImage::ImageLuma8(gray) => (gray.into_raw(), ColorType::Grayscale),
+                image::DynamicImage::ImageRgb8(rgb) => (rgb.into_raw(), ColorType::Rgb),
+                image::DynamicImage::ImageRgba8(rgba) => (rgba.into_raw(), ColorType::Rgba),
+                other => {
+                    let rgb = other.to_rgb8();
+                    (rgb.into_raw(), ColorType::Rgb)
+                }
             }
         };
 
@@ -57,23 +71,52 @@ impl ImageCompressor {
         self.write_image(
             output_path,
             &metadata,
-            &raw_px,
+            &transformed,
             &compressed_bytes,
             encoded_bits.len(),
         )?;
         Ok(())
     }
 
-    fn decompress(&mut self, input_path: &str, output_path: &str) -> Result<(), Box<dyn Error>> {
-        let (metadata, original_data, compressed_bytes, bit_count) = self.read_image(input_path)?;
+    pub fn decompress(
+        &mut self,
+        input_path: &str,
+        output_path: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let (metadata, transformed_data, compressed_bytes, bit_count) =
+            self.read_image(input_path)?;
 
-        self.build_tree(&original_data);
+        self.build_tree(&transformed_data);
         self.generate_codes();
 
         let bits = self.bytes_to_bits(&compressed_bytes, bit_count);
         let decoded = self.decode(&bits);
 
+        if decoded.len() != transformed_data.len() {
+            let msg = format!(
+                "Decoded data length ({}) does not match stored Huffman data length ({})",
+                decoded.len(),
+                transformed_data.len()
+            );
+            return Err(msg.into());
+        }
+
         let px = self.reverse_delta_encoding(&decoded);
+
+        let expected_len = metadata.width as usize
+            * metadata.height as usize
+            * metadata.color_type.channels() as usize;
+        if px.len() != expected_len {
+            let msg = format!(
+                "Decoded pixel count ({}) doesn't match expected size ({}, width={}, height={}, channels={})",
+                px.len(),
+                expected_len,
+                metadata.width,
+                metadata.height,
+                metadata.color_type.channels()
+            );
+            return Err(msg.into());
+        }
 
         let img = match metadata.color_type {
             ColorType::Grayscale => {
@@ -143,19 +186,58 @@ impl ImageCompressor {
             return;
         }
 
-        let mut heap = BinaryHeap::new();
+        #[derive(Eq)]
+        struct HeapEntry {
+            order: usize,
+            node: Node,
+        }
 
-        for (&val, &freq) in &freq_map {
-            heap.push(Node::new_leaf(freq, val));
+        impl PartialEq for HeapEntry {
+            fn eq(&self, other: &Self) -> bool {
+                self.node.freq == other.node.freq && self.order == other.order
+            }
+        }
+
+        impl Ord for HeapEntry {
+            fn cmp(&self, other: &Self) -> Ordering {
+                match other.node.freq.cmp(&self.node.freq) {
+                    Ordering::Equal => other.order.cmp(&self.order),
+                    ord => ord,
+                }
+            }
+        }
+
+        impl PartialOrd for HeapEntry {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut heap = BinaryHeap::new();
+        let mut freq_entries: Vec<(u8, usize)> = freq_map.into_iter().collect();
+        freq_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut order = 0;
+        for (val, freq) in freq_entries {
+            heap.push(HeapEntry {
+                order,
+                node: Node::new_leaf(freq, val),
+            });
+            order += 1;
         }
 
         while heap.len() > 1 {
             let left = heap.pop().unwrap();
             let right = heap.pop().unwrap();
-            heap.push(Node::new_internal(left.freq + right.freq, left, right));
+            let freq = left.node.freq + right.node.freq;
+            heap.push(HeapEntry {
+                order,
+                node: Node::new_internal(freq, left.node, right.node),
+            });
+            order += 1;
         }
 
-        self.tree = heap.pop();
+        self.tree = Some(heap.pop().unwrap().node);
     }
 
     fn generate_codes(&mut self) {
@@ -271,7 +353,7 @@ impl ImageCompressor {
         &self,
         path: &str,
         metadata: &ImageMetadata,
-        original: &[u8],
+        transformed: &[u8],
         compressed: &[u8],
         bit_count: usize,
     ) -> Result<(), Box<dyn Error>> {
@@ -280,16 +362,19 @@ impl ImageCompressor {
         file.write_all(&metadata.width.to_le_bytes())?;
         file.write_all(&metadata.height.to_le_bytes())?;
         file.write_all(&[metadata.color_type as u8])?;
-        file.write_all(&(original.len() as u64).to_le_bytes())?;
+        file.write_all(&(transformed.len() as u64).to_le_bytes())?;
         file.write_all(&(bit_count as u64).to_le_bytes())?;
 
         let mut freq_map: HashMap<u8, u32> = HashMap::new();
-        for &byte in original {
+        for &byte in transformed {
             *freq_map.entry(byte).or_insert(0) += 1;
         }
 
-        file.write_all(&(freq_map.len() as u32).to_le_bytes())?;
-        for (&byte, &freq) in &freq_map {
+        let mut freq_entries: Vec<(u8, u32)> = freq_map.into_iter().collect();
+        freq_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        file.write_all(&(freq_entries.len() as u32).to_le_bytes())?;
+        for (byte, freq) in freq_entries {
             file.write_all(&[byte])?;
             file.write_all(&freq.to_le_bytes())?;
         }
@@ -345,7 +430,7 @@ impl ImageCompressor {
         file.read_exact(&mut freq_count_buf)?;
         let freq_count = u32::from_le_bytes(freq_count_buf) as usize;
 
-        let mut ori_data = Vec::new();
+        let mut transformed_data = Vec::new();
         for _ in 0..freq_count {
             let mut byte_buf = [0u8; 1];
             file.read_exact(&mut byte_buf)?;
@@ -356,13 +441,13 @@ impl ImageCompressor {
             let freq = u32::from_le_bytes(freq_buf) as usize;
 
             for _ in 0..freq {
-                ori_data.push(byte);
+                transformed_data.push(byte);
             }
         }
 
         let mut compressed = Vec::new();
         file.read_to_end(&mut compressed)?;
 
-        Ok((metadata, ori_data, compressed, bit_count))
+        Ok((metadata, transformed_data, compressed, bit_count))
     }
 }
