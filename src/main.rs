@@ -1,3 +1,5 @@
+use huffman_image_compression::logic::image_compressor::ImageCompressor;
+
 fn main() {
-    println!("Hello, world!");
+    let mut compressor = ImageCompressor::new();
 }
