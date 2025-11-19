@@ -1,6 +1,6 @@
 # Huffman Image Compression
 
-This project compresses JPEG images using Huffman coding and provides a small CLI for compressing and decompressing `.jpg`/`.jpeg` files.
+This project compresses JPEG images using Huffman coding and provides a small CLI for compressing and decompressing `.jpg`/`.jpeg` files. See [Report](report.md) for a detailed analysis.
 
 ## Step 1: Install Rust
 
@@ -28,12 +28,12 @@ cargo check
 
 ### Compress a JPEG/PNG into `.himg`
 ```bash
-cargo run -- compress img_file/file.jpg himg_file/file.himg
+cargo run -- compress example/img_file/sample.bmp  example/himg_file/himage_sample.himg
 ```
 The output path is optional (defaults to `<input>.himg`).
 
 ### Decompress a `.himg` back to JPEG
 ```bash
-cargo run -- decompress himg_file/file.himg img_file/image-restored.jpg
+cargo run -- decompress example/himg_file/himage_sample.himg example/img_file/compressed.jpg
 ```
 The CLI enforces `.himg` for the source and `.jpg/.jpeg` for the destination, so use matching file extensions.
