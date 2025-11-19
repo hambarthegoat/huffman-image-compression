@@ -1,1 +1,6 @@
 /target
+himg_file/*
+!himg_file/.gitkeep
+
+img_file/*
+!himg_file/.gitkeep
