@@ -21,19 +21,19 @@ pub enum Command {
 
 #[derive(Parser)]
 pub struct CompressArgs {
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    #[arg(value_name = "INPUT", value_hint = ValueHint::FilePath)]
     input: PathBuf,
 
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    #[arg(value_name = "OUTPUT", value_hint = ValueHint::FilePath)]
     output: Option<PathBuf>,
 }
 
 #[derive(Parser)]
 pub struct DecompressArgs {
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    #[arg(value_name = "INPUT", value_hint = ValueHint::FilePath)]
     input: PathBuf,
 
-    #[arg(short, long, value_hint = ValueHint::FilePath)]
+    #[arg(value_name = "OUTPUT", value_hint = ValueHint::FilePath)]
     output: Option<PathBuf>,
 }
 
@@ -57,7 +57,7 @@ pub fn handle_decompress(args: DecompressArgs) -> Result<(), Box<dyn Error>> {
 
     let output = args
         .output
-        .unwrap_or_else(|| args.input.with_extension("png"));
+        .unwrap_or_else(|| args.input.with_extension("jpg"));
 
     ensure_output_extension(&output)?;
 
